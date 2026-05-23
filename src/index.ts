@@ -47,6 +47,12 @@ bot.command('skills', async (ctx) => {
  */
 async function tryDispatchTool(ctx: Context, text: string): Promise<boolean> {
   const lower = text.toLowerCase();
+  const normalized = lower.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Cualquier intento de consultar o registrar datos de Quid debe ir primero
+  // al motor central, no a herramientas externas como cripto o web.
+  const quidIntent = /\b(gaste|gasté|gasto|gastado|pague|pagué|compre|compré|ingreso|recibi|recibí|transferi|transferí|saldo|cuanto tengo|cuánto tengo|meta|ahorro|cdt|recurrente|planner|pendiente|gasolina|tanqueo|combustible)\b/.test(normalized);
+  if (quidIntent) return false;
 
   // 🎨 Generación de imágenes
   const imageKeywords = ['dibuja', 'genera una imagen', 'crea una imagen', 'pinta', 'ilustra', 'hazme una foto de'];
@@ -59,13 +65,13 @@ async function tryDispatchTool(ctx: Context, text: string): Promise<boolean> {
   }
 
   // 💰 Precio de criptomonedas
-  const cryptoKeywords = ['bitcoin', 'ethereum', 'solana', 'cripto', 'btc', 'eth', 'sol', 'precio de'];
-  if (cryptoKeywords.some(k => lower.includes(k))) {
+  const cryptoPattern = /\b(bitcoin|ethereum|solana|dogecoin|cripto|crypto|btc|eth|sol|doge)\b|precio\s+de\s+(bitcoin|ethereum|solana|dogecoin|btc|eth|sol|doge)/;
+  if (cryptoPattern.test(normalized)) {
     await ctx.replyWithChatAction('typing');
     let coin = 'bitcoin';
-    if (lower.includes('ethereum') || lower.includes('eth')) coin = 'ethereum';
-    else if (lower.includes('solana') || lower.includes('sol')) coin = 'solana';
-    else if (lower.includes('dogecoin') || lower.includes('doge')) coin = 'dogecoin';
+    if (/\b(ethereum|eth)\b/.test(normalized)) coin = 'ethereum';
+    else if (/\b(solana|sol)\b/.test(normalized)) coin = 'solana';
+    else if (/\b(dogecoin|doge)\b/.test(normalized)) coin = 'dogecoin';
     const result = await getCryptoPrice(coin);
     await ctx.reply(result, { parse_mode: 'Markdown' });
     return true;
@@ -231,6 +237,52 @@ console.log('🚀 Aura está en línea y lista para la orquesta!');
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+
+  if ((req.method === 'POST' || req.method === 'GET') && req.url?.startsWith('/digest')) {
+    const auraToken = req.headers['x-aura-token'];
+    if (!process.env.AURA_API_KEY || auraToken !== process.env.AURA_API_KEY) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: 'No autorizado' }));
+      return;
+    }
+
+    try {
+      const apiHost = process.env.QUID_API_URL ? new URL(process.env.QUID_API_URL).origin : 'http://quid-app:3000';
+      const quidResponse = await fetch(`${apiHost}/api/aura/digest`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-aura-token': process.env.AURA_API_KEY,
+        },
+      });
+
+      if (!quidResponse.ok) {
+        const errorBody = await quidResponse.text();
+        res.writeHead(quidResponse.status);
+        res.end(JSON.stringify({ error: errorBody || 'Quid rechazó el digest de Aura' }));
+        return;
+      }
+
+      const payload = await quidResponse.json() as {
+        digests?: Array<{ telegramId?: string | null; message?: string }>;
+      };
+      let sent = 0;
+
+      for (const digest of payload.digests || []) {
+        if (!digest.telegramId || !digest.message) continue;
+        await bot.api.sendMessage(Number(digest.telegramId), digest.message);
+        sent++;
+      }
+
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true, sent }));
+    } catch (error) {
+      console.error('🔥 Error enviando digest de Aura:', error);
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: 'Error enviando digest de Aura' }));
+    }
+    return;
+  }
 
   if (req.method === 'POST' && req.url === '/verify') {
     let body = '';
