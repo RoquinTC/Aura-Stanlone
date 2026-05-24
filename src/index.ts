@@ -21,6 +21,28 @@ const CATEGORY_MAP: Record<string, string[]> = {
   'Otros': ['Papelería', 'Imprevistos', 'Regalos']
 };
 
+async function fetchUserCategories(tgId: number): Promise<Record<string, string[]>> {
+  try {
+    const apiHost = process.env.QUID_API_URL ? new URL(process.env.QUID_API_URL).origin : 'http://quid-app:3000';
+    console.log(`[Aura Standalone] Fetching custom categories for Telegram ID: ${tgId} from ${apiHost}`);
+    const res = await fetch(`${apiHost}/api/aura/categories?telegramId=${tgId}`, {
+      headers: {
+        'x-aura-token': process.env.AURA_API_KEY || '',
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch categories: ${res.statusText}`);
+    }
+    const data = await res.json();
+    if (data.success && data.categories) {
+      return data.categories;
+    }
+  } catch (error) {
+    console.error('Error fetching categories from Quid App:', error);
+  }
+  return CATEGORY_MAP;
+}
+
 // ── Comandos ──────────────────────────────────────────────────────────────────
 
 bot.command('start', async (ctx) => {
@@ -320,8 +342,12 @@ bot.callbackQuery('cancel_proposal', async (ctx) => {
 
 bot.callbackQuery('select_proposal_category', async (ctx) => {
   await ctx.answerCallbackQuery();
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+
+  const userCats = await fetchUserCategories(tgId);
   const keyboard = new InlineKeyboard();
-  const categories = Object.keys(CATEGORY_MAP);
+  const categories = Object.keys(userCats);
   categories.forEach((cat, index) => {
     keyboard.text(cat, `cat_choice:${cat}`);
     if (index % 2 === 1) keyboard.row();
@@ -353,9 +379,12 @@ bot.callbackQuery('back_to_proposal', async (ctx) => {
 bot.callbackQuery(/^cat_choice:(.+)$/, async (ctx) => {
   const categoryName = ctx.match[1];
   await ctx.answerCallbackQuery();
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
   
+  const userCats = await fetchUserCategories(tgId);
   const keyboard = new InlineKeyboard();
-  const subs = CATEGORY_MAP[categoryName] || [];
+  const subs = userCats[categoryName] || [];
   subs.forEach((sub, index) => {
     keyboard.text(sub, `sub_choice:${categoryName}/${sub}`);
     if (index % 2 === 1) keyboard.row();
