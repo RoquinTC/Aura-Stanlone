@@ -1,4 +1,4 @@
-import { Bot, Context } from 'grammy';
+import { Bot, Context, InlineKeyboard } from 'grammy';
 import { PairingService } from './agent/pairing.js';
 import { quidSync } from './services/quid-sync.js';
 import { VoiceService } from './services/voice.ts';
@@ -120,24 +120,7 @@ bot.on('message:document', async (ctx) => {
 // ── Handler principal de mensajes ──────────────────────────────────────────────
 const chatHistory = new Map<number, any[]>();
 
-bot.on('message', async (ctx) => {
-  const tgId = ctx.from?.id;
-  if (!tgId) return;
-  console.log(`[Telegram] Mensaje recibido de ${tgId}`);
-
-  let text = ctx.message.text;
-  let isVoice = !!ctx.message.voice;
-
-  // 1. Si es voz, transcribir primero
-  if (isVoice && ctx.message.voice) {
-    ctx.replyWithChatAction('record_voice');
-    const file = await ctx.getFile();
-    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    text = await VoiceService.transcribeAudio(fileUrl);
-  }
-
-  if (!text) return;
-
+async function processChatMessage(ctx: Context, tgId: number, text: string, isVoice: boolean) {
   const user = await quidSync.getUserByTelegram(tgId);
   if (!user) {
     console.log(`[Telegram] Usuario ${tgId} no vinculado`);
@@ -159,6 +142,7 @@ bot.on('message', async (ctx) => {
   history.push({ role: 'user', content: text });
 
   let responseText = '';
+  let replyMarkup = undefined;
   try {
     const apiHost = process.env.QUID_API_URL ? new URL(process.env.QUID_API_URL).origin : 'http://quid-app:3000';
     console.log(`[Quid Aura Engine] Enviando mensaje de ${tgId} a ${apiHost}/api/aura/chat`);
@@ -188,6 +172,20 @@ bot.on('message', async (ctx) => {
     const data = await res.json();
     responseText = data.text;
     console.log(`[Quid Aura Engine] Respuesta recibida para ${tgId}`);
+
+    // Construcción de botones interactivos si se requiere elegir cuenta/tarjeta
+    if (data.action && data.action.type === 'select_account' && Array.isArray(data.action.choices)) {
+      const keyboard = new InlineKeyboard();
+      data.action.choices.forEach((choice: any, index: number) => {
+        const callbackData = `select_account:${choice.name}`.slice(0, 64);
+        keyboard.text(choice.name, callbackData);
+        if (index % 2 === 1) {
+          keyboard.row();
+        }
+      });
+      keyboard.row().text('❌ Cancelar', 'cancel_select_account');
+      replyMarkup = keyboard;
+    }
     
     // Guardamos la respuesta de Aura en el historial
     history.push({ role: 'assistant', content: responseText });
@@ -210,13 +208,13 @@ bot.on('message', async (ctx) => {
   if (isVoice) {
     const audioPath = await VoiceService.textToSpeech(responseText);
     if (audioPath) {
-      await ctx.replyWithVoice(new InputFile(audioPath));
+      await ctx.replyWithVoice(new InputFile(audioPath), replyMarkup ? { reply_markup: replyMarkup } : undefined);
       fs.unlinkSync(audioPath);
     } else {
-      await ctx.reply(responseText);
+      await ctx.reply(responseText, replyMarkup ? { reply_markup: replyMarkup } : undefined);
     }
   } else {
-    await ctx.reply(responseText);
+    await ctx.reply(responseText, replyMarkup ? { reply_markup: replyMarkup } : undefined);
   }
 
   try {
@@ -224,6 +222,57 @@ bot.on('message', async (ctx) => {
   } catch {
     // Si Telegram no permite borrar el mensaje temporal, no bloqueamos la respuesta.
   }
+}
+
+bot.on('message', async (ctx) => {
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+  console.log(`[Telegram] Mensaje recibido de ${tgId}`);
+
+  let text = ctx.message.text;
+  let isVoice = !!ctx.message.voice;
+
+  // 1. Si es voz, transcribir primero
+  if (isVoice && ctx.message.voice) {
+    ctx.replyWithChatAction('record_voice');
+    const file = await ctx.getFile();
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    text = await VoiceService.transcribeAudio(fileUrl);
+  }
+
+  if (!text) return;
+
+  await processChatMessage(ctx, tgId, text, isVoice);
+});
+
+// ── Manejadores de Callbacks (Botones) ─────────────────────────────────────────
+
+bot.callbackQuery(/^select_account:(.+)$/, async (ctx) => {
+  const accountName = ctx.match[1];
+  await ctx.answerCallbackQuery();
+  
+  // Remover los botones para evitar doble clic
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  } catch (err) {
+    console.error('Error al remover el reply markup:', err);
+  }
+
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+
+  // Procesar la selección como si el usuario la hubiera escrito
+  await processChatMessage(ctx, tgId, accountName, false);
+});
+
+bot.callbackQuery('cancel_select_account', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  } catch (err) {
+    console.error('Error al remover el reply markup:', err);
+  }
+  await ctx.reply('❌ Proceso cancelado. ¿Qué más deseas hacer?');
 });
 
 bot.catch((err) => {
