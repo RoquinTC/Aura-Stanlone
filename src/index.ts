@@ -9,6 +9,18 @@ import fs from 'fs';
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!);
 
+const CATEGORY_MAP: Record<string, string[]> = {
+  'Alimentación': ['Supermercado', 'Restaurantes', 'Comida rápida', 'Cafetería'],
+  'Transporte': ['Combustible', 'Pasajes / Uber', 'Peajes', 'Mantenimiento'],
+  'Servicios': ['Celular / Internet', 'Luz / Agua / Gas', 'Suscripciones'],
+  'Salud': ['Medicamentos', 'Citas médicas', 'Seguro / EPS'],
+  'Entretenimiento': ['Cine / Salidas', 'Rumba / Bar', 'Eventos'],
+  'Educación': ['Cursos', 'Matrícula', 'Libros / Papelería'],
+  'Ropa': ['Ropa', 'Zapatos', 'Accesorios'],
+  'Deudas': ['Tarjetas de crédito', 'Préstamos'],
+  'Otros': ['Papelería', 'Imprevistos', 'Regalos']
+};
+
 // ── Comandos ──────────────────────────────────────────────────────────────────
 
 bot.command('start', async (ctx) => {
@@ -185,6 +197,13 @@ async function processChatMessage(ctx: Context, tgId: number, text: string, isVo
       });
       keyboard.row().text('❌ Cancelar', 'cancel_select_account');
       replyMarkup = keyboard;
+    } else if (data.action && data.action.type === 'proposal') {
+      const keyboard = new InlineKeyboard()
+        .text('✅ Confirmar', 'confirm_proposal')
+        .text('✏️ Categoría', 'select_proposal_category')
+        .row()
+        .text('❌ Cancelar', 'cancel_proposal');
+      replyMarkup = keyboard;
     }
     
     // Guardamos la respuesta de Aura en el historial
@@ -273,6 +292,99 @@ bot.callbackQuery('cancel_select_account', async (ctx) => {
     console.error('Error al remover el reply markup:', err);
   }
   await ctx.reply('❌ Proceso cancelado. ¿Qué más deseas hacer?');
+});
+
+bot.callbackQuery('confirm_proposal', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  } catch (err) {
+    console.error('Error al remover el reply markup:', err);
+  }
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+  await processChatMessage(ctx, tgId, 'confirmar', false);
+});
+
+bot.callbackQuery('cancel_proposal', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  } catch (err) {
+    console.error('Error al remover el reply markup:', err);
+  }
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+  await processChatMessage(ctx, tgId, 'cancelar', false);
+});
+
+bot.callbackQuery('select_proposal_category', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard();
+  const categories = Object.keys(CATEGORY_MAP);
+  categories.forEach((cat, index) => {
+    keyboard.text(cat, `cat_choice:${cat}`);
+    if (index % 2 === 1) keyboard.row();
+  });
+  keyboard.row().text('⬅️ Volver', 'back_to_proposal');
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (err) {
+    console.error('Error editing message reply markup:', err);
+  }
+});
+
+bot.callbackQuery('back_to_proposal', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard()
+    .text('✅ Confirmar', 'confirm_proposal')
+    .text('✏️ Categoría', 'select_proposal_category')
+    .row()
+    .text('❌ Cancelar', 'cancel_proposal');
+    
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (err) {
+    console.error('Error editing message reply markup:', err);
+  }
+});
+
+bot.callbackQuery(/^cat_choice:(.+)$/, async (ctx) => {
+  const categoryName = ctx.match[1];
+  await ctx.answerCallbackQuery();
+  
+  const keyboard = new InlineKeyboard();
+  const subs = CATEGORY_MAP[categoryName] || [];
+  subs.forEach((sub, index) => {
+    keyboard.text(sub, `sub_choice:${categoryName}/${sub}`);
+    if (index % 2 === 1) keyboard.row();
+  });
+  keyboard.row().text(`Solo ${categoryName}`, `sub_choice:${categoryName}`);
+  keyboard.row().text('⬅️ Volver', 'select_proposal_category');
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+  } catch (err) {
+    console.error('Error editing message reply markup:', err);
+  }
+});
+
+bot.callbackQuery(/^sub_choice:(.+)$/, async (ctx) => {
+  const choice = ctx.match[1]; // "Category/Subcategory" or "Category"
+  await ctx.answerCallbackQuery();
+  
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+  } catch (err) {
+    console.error('Error al remover el reply markup:', err);
+  }
+  
+  const tgId = ctx.from?.id;
+  if (!tgId) return;
+
+  const formattedChoice = `categoría: ${choice}`;
+  await processChatMessage(ctx, tgId, formattedChoice, false);
 });
 
 bot.catch((err) => {
