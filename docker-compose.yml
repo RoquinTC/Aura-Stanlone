@@ -7,6 +7,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - AURA_API_KEY=${AURA_API_KEY}
       - QUID_API_URL=${QUID_API_URL}
+      - QUID_APP_URL=${QUID_APP_URL:-https://quid.roquintc.app}
       - AURA_MODEL=${AURA_MODEL:-hermes3:8b}
       - OLLAMA_OPENAI_URL=${OLLAMA_OPENAI_URL:-http://quid-ollama:11434/v1}
       - DEFAULT_USER_EMAIL=${DEFAULT_USER_EMAIL}

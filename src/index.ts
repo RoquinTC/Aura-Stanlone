@@ -9,6 +9,35 @@ import fs from 'fs';
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!);
 
+function getQuidAppUrl(path = '') {
+  const configuredUrl = process.env.QUID_APP_URL || 'https://quid.roquintc.app';
+  return `${configuredUrl.replace(/\/$/, '')}${path}`;
+}
+
+function addQuidNavigationButton(keyboard: InlineKeyboard | undefined, text: string, responseText: string) {
+  const normalized = `${text} ${responseText}`.toLowerCase();
+  const target =
+    /\b(lista|listas|mercado|compras?)\b/.test(normalized)
+      ? { label: '🛒 Ver listas de mercado', path: '/?module=pantry&view=shopping-lists' }
+      : /\b(cita|citas|m[eé]dic[oa]|doctor|eps)\b/.test(normalized)
+        ? { label: '🩺 Ver citas médicas', path: '/?module=health&view=appointments' }
+        : /\b(deuda|deudas|cr[eé]dito|tarjeta)\b/.test(normalized)
+          ? { label: '💳 Ver deudas', path: '/?module=finance&view=debts' }
+          : /\b(pago|pagos|vencimiento|recurrente)\b/.test(normalized)
+            ? { label: '📅 Ver pagos', path: '/?module=finance&view=recurring' }
+            : /\b(cuenta|cuentas|saldo|balance|finanzas?)\b/.test(normalized)
+              ? { label: '📊 Ver finanzas', path: '/?module=finance&view=overview' }
+              : null;
+
+  if (!target) return keyboard;
+
+  if (keyboard) {
+    return keyboard.row().url(target.label, getQuidAppUrl(target.path));
+  }
+
+  return new InlineKeyboard().url(target.label, getQuidAppUrl(target.path));
+}
+
 const CATEGORY_MAP: Record<string, string[]> = {
   'Alimentación': ['Supermercado', 'Restaurantes', 'Comida rápida', 'Cafetería'],
   'Transporte': ['Combustible', 'Pasajes / Uber', 'Peajes', 'Mantenimiento'],
@@ -227,6 +256,8 @@ async function processChatMessage(ctx: Context, tgId: number, text: string, isVo
         .text('❌ Cancelar', 'cancel_proposal');
       replyMarkup = keyboard;
     }
+
+    replyMarkup = addQuidNavigationButton(replyMarkup, text, responseText);
     
     // Guardamos la respuesta de Aura en el historial
     history.push({ role: 'assistant', content: responseText });
