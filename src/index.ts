@@ -9,6 +9,16 @@ import fs from 'fs';
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!);
 
+function normalizeText(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function getQuidAppUrl(path = '') {
   const configuredUrl = process.env.QUID_APP_URL || 'https://quid.roquintc.app';
   return `${configuredUrl.replace(/\/$/, '')}${path}`;
@@ -70,6 +80,69 @@ async function fetchUserCategories(tgId: number): Promise<Record<string, string[
     console.error('Error fetching categories from Quid App:', error);
   }
   return CATEGORY_MAP;
+}
+
+function shouldUseQuid(text: string, history: any[]) {
+  const normalized = normalizeText(text);
+  const previousAssistantText = [...history]
+    .reverse()
+    .find((message) => message?.role === 'assistant')?.content || '';
+  const previousAssistant = normalizeText(previousAssistantText);
+
+  if (
+    /\b(confirmar|confirmo|cancelar|cancela|categoria|cuenta|tarjeta|moneditas|bold|banco|rappi|nu)\b/.test(normalized) &&
+    /\b(resumen para confirmar|puedo guardarlo|desde cual|desde cuál|proceso cancelado)\b/.test(previousAssistant)
+  ) {
+    return true;
+  }
+
+  return /\b(gaste|gasto|gastado|pague|compre|compra|compre|ingreso|recibi|recibido|transferi|transferencia|saldo|balance|cuanto tengo|cuanto me queda|gastos|ingresos|meta|ahorro|ahorros|cdt|deuda|deudas|presupuesto|recurrente|planner|pendiente|salud|cita|medicamento|medicina|orden medica|autorizacion|despensa|mercado|lista|vehiculo|vehiculos|moto|carro|gasolina|tanqueo|combustible|soat|tecnomecanica|tecnomecánica|mantenimiento|aceite|llantas|frenos|kilometraje|autonomia|autonomía|radar|como voy|diagnostico|analisis financiero|revision financiera|proyecta|proyeccion|proyección)\b/.test(normalized);
+}
+
+async function askOdysseus(history: any[], userName?: string | null) {
+  const apiUrl = process.env.ODYSSEUS_API_URL || '';
+  const apiToken = process.env.ODYSSEUS_API_TOKEN || '';
+  const session = process.env.ODYSSEUS_SESSION_ID || '';
+  const enabled = (process.env.ODYSSEUS_ENABLED || 'false').toLowerCase() === 'true';
+
+  if (!enabled || !apiUrl || !apiToken || !session) {
+    return null;
+  }
+
+  const conversation = history
+    .slice(-10)
+    .filter((message) => message?.role === 'user' || message?.role === 'assistant')
+    .map((message) => `${message.role}: ${message.content}`)
+    .join('\n');
+
+  const prompt = `Eres Aura, la asistente personal de ${userName || 'Robin'}.
+Responde en español latinoamericano, con tono natural, cálido y claro.
+Para conversación general, explicación, ideas, dudas random o ayuda de pensamiento, responde directamente.
+No inventes datos de Quid. Si el usuario pide saldos, compras, salud, registros, citas, medicamentos o datos exactos de la app, dile brevemente que eso lo manejas consultando Quid.
+
+Conversación reciente:
+${conversation}`;
+
+  const res = await fetch(`${apiUrl.replace(/\/$/, '')}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiToken}`,
+    },
+    body: JSON.stringify({
+      session,
+      message: prompt,
+      use_web: false,
+      use_research: false,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Odysseus respondió con estado ${res.status}`);
+  }
+
+  const data = await res.json() as { response?: string };
+  return data.response?.trim() || null;
 }
 
 // ── Comandos ──────────────────────────────────────────────────────────────────
@@ -196,9 +269,8 @@ async function processChatMessage(ctx: Context, tgId: number, text: string, isVo
   const toolHandled = await tryDispatchTool(ctx, text);
   if (toolHandled) return;
 
-  // 3. Si no hay tool, usar el nuevo "Cerebro Central" en Quid App
+  // 3. Aura orquesta: Quid para datos/acciones de la app, Odysseus para conversación general.
   await ctx.replyWithChatAction(isVoice ? 'record_voice' : 'typing');
-  const thinkingMessage = await ctx.reply('Te escucho. Dame un momento mientras reviso Quid.');
   
   // Mantenemos un historial básico en memoria por usuario (máximo 10 mensajes para no saturar)
   let history = chatHistory.get(tgId) || [];
@@ -207,57 +279,66 @@ async function processChatMessage(ctx: Context, tgId: number, text: string, isVo
   let responseText = '';
   let replyMarkup = undefined;
   try {
-    const apiHost = process.env.QUID_API_URL ? new URL(process.env.QUID_API_URL).origin : 'http://quid-app:3000';
-    console.log(`[Quid Aura Engine] Enviando mensaje de ${tgId} a ${apiHost}/api/aura/chat`);
-    const res = await fetch(`${apiHost}/api/aura/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-aura-token': process.env.AURA_API_KEY || '',
-      },
-      body: JSON.stringify({
-        telegramId: tgId,
-        messages: history
-      })
-    });
-    
-    if (!res.ok) {
-      const errorBody = await res.text();
-      console.error(`[Quid Aura Engine] HTTP ${res.status}: ${errorBody}`);
-      if (res.status === 404) {
-        throw new Error('Tu Telegram todavía no está vinculado con Quid. Usa /start para generar un código.');
-      }
-      if (res.status >= 500) {
-        throw new Error('Quid está activo, pero Aura no pudo procesar la solicitud. Revisa Ollama y el modelo configurado.');
-      }
-      throw new Error('Quid rechazó la solicitud de Aura.');
-    }
-    const data = await res.json();
-    responseText = data.text;
-    console.log(`[Quid Aura Engine] Respuesta recibida para ${tgId}`);
-
-    // Construcción de botones interactivos si se requiere elegir cuenta/tarjeta
-    if (data.action && data.action.type === 'select_account' && Array.isArray(data.action.choices)) {
-      const keyboard = new InlineKeyboard();
-      data.action.choices.forEach((choice: any, index: number) => {
-        const callbackData = `select_account:${choice.name}`.slice(0, 64);
-        keyboard.text(choice.name, callbackData);
-        if (index % 2 === 1) {
-          keyboard.row();
-        }
+    if (shouldUseQuid(text, history)) {
+      const apiHost = process.env.QUID_API_URL ? new URL(process.env.QUID_API_URL).origin : 'http://quid-app:3000';
+      console.log(`[Quid Aura Engine] Enviando mensaje de ${tgId} a ${apiHost}/api/aura/chat`);
+      const res = await fetch(`${apiHost}/api/aura/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-aura-token': process.env.AURA_API_KEY || '',
+        },
+        body: JSON.stringify({
+          telegramId: tgId,
+          messages: history
+        })
       });
-      keyboard.row().text('❌ Cancelar', 'cancel_select_account');
-      replyMarkup = keyboard;
-    } else if (data.action && data.action.type === 'proposal') {
-      const keyboard = new InlineKeyboard()
-        .text('✅ Confirmar', 'confirm_proposal')
-        .text('✏️ Categoría', 'select_proposal_category')
-        .row()
-        .text('❌ Cancelar', 'cancel_proposal');
-      replyMarkup = keyboard;
-    }
+      
+      if (!res.ok) {
+        const errorBody = await res.text();
+        console.error(`[Quid Aura Engine] HTTP ${res.status}: ${errorBody}`);
+        if (res.status === 404) {
+          throw new Error('Tu Telegram todavía no está vinculado con Quid. Usa /start para generar un código.');
+        }
+        if (res.status >= 500) {
+          throw new Error('Quid está activo, pero Aura no pudo procesar la solicitud.');
+        }
+        throw new Error('Quid rechazó la solicitud de Aura.');
+      }
+      const data = await res.json();
+      responseText = data.text;
+      console.log(`[Quid Aura Engine] Respuesta recibida para ${tgId}`);
 
-    replyMarkup = addQuidNavigationButton(replyMarkup, text, responseText);
+      // Construcción de botones interactivos si se requiere elegir cuenta/tarjeta
+      if (data.action && data.action.type === 'select_account' && Array.isArray(data.action.choices)) {
+        const keyboard = new InlineKeyboard();
+        data.action.choices.forEach((choice: any, index: number) => {
+          const callbackData = `select_account:${choice.name}`.slice(0, 64);
+          keyboard.text(choice.name, callbackData);
+          if (index % 2 === 1) {
+            keyboard.row();
+          }
+        });
+        keyboard.row().text('❌ Cancelar', 'cancel_select_account');
+        replyMarkup = keyboard;
+      } else if (data.action && data.action.type === 'proposal') {
+        const keyboard = new InlineKeyboard()
+          .text('✅ Confirmar', 'confirm_proposal')
+          .text('✏️ Categoría', 'select_proposal_category')
+          .row()
+          .text('❌ Cancelar', 'cancel_proposal');
+        replyMarkup = keyboard;
+      }
+
+      replyMarkup = addQuidNavigationButton(replyMarkup, text, responseText);
+    } else {
+      console.log(`[Odysseus Aura Brain] Enviando conversación general de ${tgId}`);
+      responseText = await askOdysseus(history, user.name) || '';
+      if (!responseText) {
+        throw new Error('Odysseus no respondió en este momento.');
+      }
+      console.log(`[Odysseus Aura Brain] Respuesta recibida para ${tgId}`);
+    }
     
     // Guardamos la respuesta de Aura en el historial
     history.push({ role: 'assistant', content: responseText });
@@ -289,11 +370,6 @@ async function processChatMessage(ctx: Context, tgId: number, text: string, isVo
     await ctx.reply(responseText, replyMarkup ? { reply_markup: replyMarkup } : undefined);
   }
 
-  try {
-    await ctx.api.deleteMessage(tgId, thinkingMessage.message_id);
-  } catch {
-    // Si Telegram no permite borrar el mensaje temporal, no bloqueamos la respuesta.
-  }
 }
 
 bot.on('message', async (ctx) => {
